@@ -13,6 +13,7 @@ import (
 	"github.com/hermes-agent/backend/internal/llm"
 	"github.com/hermes-agent/backend/internal/market"
 	"github.com/hermes-agent/backend/internal/models"
+	"github.com/hermes-agent/backend/internal/news"
 )
 
 // ProgressCallback is called during analysis to report stage progress.
@@ -30,12 +31,12 @@ type Orchestrator struct {
 }
 
 // NewOrchestrator creates a new orchestrator with all four agents.
-func NewOrchestrator(llmClient *llm.Client, marketClient *market.Client) *Orchestrator {
+func NewOrchestrator(llmClient *llm.Client, marketClient *market.Client, newsClient *news.Client) *Orchestrator {
 	return &Orchestrator{
 		llmClient:     llmClient,
 		marketClient:  marketClient,
 		marketAgent:   NewMarketAgent(llmClient),
-		newsAgent:     NewNewsAgent(llmClient),
+		newsAgent:     NewNewsAgent(llmClient, newsClient),
 		riskAgent:     NewRiskAgent(llmClient),
 		strategyAgent: NewStrategyAgent(llmClient),
 	}

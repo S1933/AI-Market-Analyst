@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -21,8 +21,13 @@ export const metadata: Metadata = {
     description: 'Multi-agent financial market intelligence platform',
     type: 'website',
   },
+};
+
+export const viewport: Viewport = {
   themeColor: '#0a0c10',
-  viewport: 'width=device-width, initial-scale=1, maximum-scale=1',
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
 };
 
 export default function RootLayout({

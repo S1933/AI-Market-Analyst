@@ -5,12 +5,14 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/hermes-agent/backend/internal/llm"
 	"github.com/hermes-agent/backend/internal/market"
 	"github.com/hermes-agent/backend/internal/models"
+	"github.com/hermes-agent/backend/internal/news"
 )
 
 // ─────────────────────────────────────────────────────────────
@@ -21,6 +23,7 @@ import (
 // financial news, macroeconomic context, and company/sector events.
 type NewsAgent struct {
 	llm       *llm.Client
+	newsCli   *news.Client
 	marketCli *market.Client
 	name      string
 }
@@ -29,9 +32,10 @@ type NewsAgent struct {
 var newsAgentSystemPrompt string
 
 // NewNewsAgent creates a new NewsAgent.
-func NewNewsAgent(llmClient *llm.Client) *NewsAgent {
+func NewNewsAgent(llmClient *llm.Client, newsClient *news.Client) *NewsAgent {
 	return &NewsAgent{
 		llm:       llmClient,
+		newsCli:   newsClient,
 		marketCli: nil,
 		name:      "news_agent",
 	}
@@ -43,21 +47,27 @@ func (a *NewsAgent) Name() string {
 }
 
 // Analyze performs fundamental analysis on the given symbol.
-// It first fetches market context, then calls the LLM for interpretation.
+// It fetches real news articles (when available via FINNHUB_API_KEY or NEWSAPI_API_KEY), then
+// passes them to the LLM for structured analysis.
 func (a *NewsAgent) Analyze(ctx context.Context, marketData *market.MarketData) (*models.NewsAnalysis, error) {
 	analysis := &models.NewsAnalysis{
 		AgentName:   a.name,
 		GeneratedAt: time.Now(),
 	}
 
-	// ── Build the user prompt with market context ──
-	userPrompt := a.buildUserPrompt(marketData)
+	// ── Fetch live news articles ──
+	articles, newsErr := a.newsCli.FetchNews(ctx, marketData.Quote.Symbol)
+	if newsErr != nil {
+		log.Printf("[WARN] NewsAgent: failed to fetch live news: %v", newsErr)
+	}
 
-	// ── Call LLM for news interpretation ──
+	// ── Build the user prompt (with or without live articles) ──
+	userPrompt := a.buildUserPrompt(marketData, articles)
+
+	// ── Call LLM for interpretation ──
 	var llmOutput newsLLMOutput
 	err := a.llm.ChatJSON(ctx, newsAgentSystemPrompt, userPrompt, &llmOutput)
 	if err != nil {
-		// If LLM fails, return a degraded analysis with available data
 		analysis.Summary = fmt.Sprintf("Analyse des actualités indisponible (erreur LLM : %v). Consultez les principales sources d'actualités financières manuellement.", err)
 		analysis.OverallSentiment = "mixed"
 		analysis.ImpactOnAsset = "neutral"
@@ -86,7 +96,6 @@ func (a *NewsAgent) Analyze(ctx context.Context, marketData *market.MarketData) 
 		})
 	}
 
-	// Ensure we always have at least a minimal event list
 	if len(analysis.RecentEvents) == 0 {
 		analysis.RecentEvents = a.fallbackEvents(marketData)
 	}
@@ -95,7 +104,6 @@ func (a *NewsAgent) Analyze(ctx context.Context, marketData *market.MarketData) 
 		analysis.KeyThemes = a.fallbackThemes(marketData)
 	}
 
-	// Store raw text for traceability
 	analysis.RawText = fmt.Sprintf("Sentiment : %s | Impact : %s | Thèmes : %s | Macro : %s",
 		analysis.OverallSentiment, analysis.ImpactOnAsset,
 		strings.Join(analysis.KeyThemes, ", "), analysis.MacroOutlook)
@@ -117,7 +125,7 @@ func (a *NewsAgent) Run(ctx context.Context, symbol string, marketData *market.M
 // PROMPT BUILDING
 // ─────────────────────────────────────────────────────────────
 
-func (a *NewsAgent) buildUserPrompt(data *market.MarketData) string {
+func (a *NewsAgent) buildUserPrompt(data *market.MarketData, articles []news.Article) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("Analyse les actualités récentes et les facteurs fondamentaux pour l'actif suivant :\n\n"))
@@ -140,12 +148,30 @@ func (a *NewsAgent) buildUserPrompt(data *market.MarketData) string {
 		sb.WriteString(fmt.Sprintf("VOLATILITÉ 20 JOURS : %.2f%%\n\n", vol))
 	}
 
-	sb.WriteString("INSTRUCTIONS DE CONTEXTE :\n")
-	sb.WriteString("1. Sur la base de tes connaissances d'entraînement (jusqu'à début 2025), identifie les actualités récentes et les facteurs macro les plus importants.\n")
-	sb.WriteString("2. Prends en compte : la politique des banques centrales (Fed, BCE, etc.), les rapports de résultats, les événements géopolitiques, les changements réglementaires, les tendances sectorielles.\n")
-	sb.WriteString("3. Si tu n'es pas sûr des développements très récents (2-4 dernières semaines), indique-le dans ton analyse.\n")
-	sb.WriteString("4. Pour chaque événement, estime l'impact (high/medium/low) et le sentiment.\n")
-	sb.WriteString("5. Produis UNIQUEMENT un JSON valide conforme au schéma spécifié.\n")
+	// ── Inject live news articles or fallback instructions ──
+	if len(articles) > 0 {
+		sb.WriteString("ACTUALITÉS RÉCENTES (fournies par API, temps réel) :\n\n")
+		for i, art := range articles {
+			sb.WriteString(fmt.Sprintf("--- Article %d ---\n", i+1))
+			sb.WriteString(fmt.Sprintf("Titre : %s\n", art.Title))
+			sb.WriteString(fmt.Sprintf("Source : %s\n", art.Source))
+			sb.WriteString(fmt.Sprintf("Date : %s\n", art.Published.Format("2006-01-02 15:04")))
+			sb.WriteString(fmt.Sprintf("Résumé : %s\n\n", art.Summary))
+		}
+		sb.WriteString("INSTRUCTIONS :\n")
+		sb.WriteString("1. Analyse les articles ci-dessus — ce sont les vraies actualités du moment pour cet actif.\n")
+		sb.WriteString("2. Complète avec ton contexte macroéconomique (politique des banques centrales, géopolitique, tendances globales).\n")
+		sb.WriteString("3. Pour chaque événement, estime l'impact (high/medium/low) et le sentiment.\n")
+		sb.WriteString("4. Si un article est peu pertinent, ignore-le.\n")
+		sb.WriteString("5. Produis UNIQUEMENT un JSON valide conforme au schéma spécifié.\n")
+	} else {
+		sb.WriteString("INSTRUCTIONS DE CONTEXTE :\n")
+		sb.WriteString("1. Aucune actualité temps réel n'est disponible. Sur la base de tes connaissances d'entraînement (jusqu'à début 2025), identifie les actualités récentes et les facteurs macro les plus importants.\n")
+		sb.WriteString("2. Prends en compte : la politique des banques centrales (Fed, BCE, etc.), les rapports de résultats, les événements géopolitiques, les changements réglementaires, les tendances sectorielles.\n")
+		sb.WriteString("3. Indique clairement que les actualités proviennent de tes connaissances d'entraînement et peuvent être datées.\n")
+		sb.WriteString("4. Pour chaque événement, estime l'impact (high/medium/low) et le sentiment.\n")
+		sb.WriteString("5. Produis UNIQUEMENT un JSON valide conforme au schéma spécifié.\n")
+	}
 
 	return sb.String()
 }
@@ -167,7 +193,6 @@ func (a *NewsAgent) fallbackEvents(data *market.MarketData) []models.NewsItem {
 		},
 	}
 
-	// Ajouter le contexte de tendance
 	ts := data.Indicators.TrendStructure
 	items = append(items, models.NewsItem{
 		Title:     fmt.Sprintf("Structure de marché : phase %s (force %s)", ts.Phase, ts.Strength),

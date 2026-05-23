@@ -23,6 +23,7 @@ import (
 	"github.com/hermes-agent/backend/internal/cache"
 	"github.com/hermes-agent/backend/internal/llm"
 	"github.com/hermes-agent/backend/internal/market"
+	"github.com/hermes-agent/backend/internal/news"
 )
 
 func main() {
@@ -40,11 +41,12 @@ func main() {
 
 	// ── Initialise Subsystems ──────────────────────────────────────
 	marketClient := market.NewClient()
+	newsClient := news.NewClient()
 	llmClient := llm.NewClient()
 	analysisCache := cache.New(cacheTTL, maxCacheSize)
 
 	// ── Initialise Orchestrator ────────────────────────────────────
-	orch := agents.NewOrchestrator(llmClient, marketClient)
+	orch := agents.NewOrchestrator(llmClient, marketClient, newsClient)
 
 	// ── Initialise API Handler ─────────────────────────────────────
 	handler := api.NewHandler(marketClient, orch, analysisCache)

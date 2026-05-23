@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -101,7 +102,7 @@ func (c *Client) ChatWithMessages(ctx context.Context, messages []Message) (stri
 	// Enforce a 120s deadline on the LLM call regardless of the parent
 	// context. Go's http.Client ignores Client.Timeout when the request
 	// context already carries a deadline, so we must create our own.
-	llmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	llmCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	reqBody := ChatRequest{
@@ -162,35 +163,41 @@ func (c *Client) ChatJSON(ctx context.Context, systemPrompt, userPrompt string, 
 		return err
 	}
 	if err := json.Unmarshal([]byte(content), target); err != nil {
-		// Try to extract JSON from markdown code blocks
 		cleaned := extractJSONFromMarkdown(content)
 		if err2 := json.Unmarshal([]byte(cleaned), target); err2 != nil {
-			return fmt.Errorf("unmarshal JSON response: %w (raw: %s)", err, content)
+			return fmt.Errorf("unmarshal JSON response: %w (cleaned: %s)", err2, cleaned)
 		}
 	}
 	return nil
 }
 
-// extractJSONFromMarkdown attempts to extract JSON content from markdown code blocks.
+// extractJSONFromMarkdown strips markdown code fences and returns the inner content.
+// Handles ```json, ```, and leading/trailing whitespace.
 func extractJSONFromMarkdown(content string) string {
-	// Simple state machine to find ```json ... ``` blocks
-	start := -1
-	end := -1
-	for i := 0; i < len(content)-7; i++ {
-		if content[i:i+7] == "```json" {
-			start = i + 7
-			// Find closing ```
-			for j := start; j < len(content)-2; j++ {
-				if content[j:j+3] == "```" {
-					end = j
-					goto done
-				}
-			}
-		}
+	return extractFencedBlock(content, "```")
+}
+
+// extractFencedBlock finds content between opening and closing delimiters.
+// The opening delimiter may be followed by a language tag (e.g. ```json).
+func extractFencedBlock(content, delim string) string {
+	// Find the first occurrence of the delimiter.
+	startIdx := strings.Index(content, delim)
+	if startIdx < 0 {
+		return content
 	}
-done:
-	if start >= 0 && end > start {
-		return content[start:end]
+
+	// Skip the delimiter and any language tag (everything up to the first newline).
+	innerStart := startIdx + len(delim)
+	if idx := strings.IndexByte(content[innerStart:], '\n'); idx >= 0 {
+		innerStart += idx + 1
 	}
-	return content
+
+	// Find the closing delimiter after innerStart.
+	endIdx := strings.Index(content[innerStart:], delim)
+	if endIdx < 0 {
+		// No closing fence — return everything after the opening fence.
+		return strings.TrimSpace(content[innerStart:])
+	}
+
+	return strings.TrimSpace(content[innerStart : innerStart+endIdx])
 }
